@@ -69,6 +69,20 @@ Then, in another terminal:
 cd dashboard && npm install && npm run dev     # http://localhost:5173 (proxies /api -> :8000)
 ```
 
+### Show it to someone (temporary public link, no cloud account)
+
+```bash
+.\scripts\demo.ps1
+```
+
+Starts the Docker stack if needed, opens a free Cloudflare quick tunnel to the
+dashboard, and prints an `https://….trycloudflare.com` link. Share the link and
+the login (`DASHBOARD_USER` / `DASHBOARD_PASSWORD` from `.env`; the script
+refuses to open a tunnel without a password). The link lives only while that
+window is open; `Ctrl+C` ends it, the local stack keeps running. Add `-Fresh`
+to wipe stored alerts first for a clean demo. Requires
+`winget install -e --id Cloudflare.cloudflared` once.
+
 ### Try the API directly
 
 ```bash
