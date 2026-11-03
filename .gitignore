@@ -21,3 +21,4 @@ dashboard/dist/
 *.db
 .terraform/
 *.tfstate*
+.claude/
