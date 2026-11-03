@@ -42,6 +42,13 @@ docker compose up --build                        # everything else
 Scale the scorers with `docker compose up --scale consumer=4`. Swap the broker to
 Kafka with `docker compose -f docker-compose.yml -f docker-compose.kafka.yml up`.
 
+**Skip training:** the model trained for the results below is published as a
+GitHub release. Download its three files into `models/` and skip the train step:
+
+```bash
+gh release download model-v1 --dir models
+```
+
 ### Option B — no Docker (laptop / Windows)
 
 ```bash
