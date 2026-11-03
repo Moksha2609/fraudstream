@@ -21,6 +21,12 @@ class Settings(BaseSettings):
     consumer_name: str = "scorer-1"
     # how many messages a consumer pulls per read
     consume_batch: int = 64
+    # standalone consumers publish counters/latency/drift here so the API can
+    # aggregate them across processes; 0 disables the heartbeat
+    stats_topic: str = "stats"
+    stats_interval_s: float = 2.0
+    # heartbeats older than this no longer count towards live throughput
+    stats_stale_s: float = 10.0
 
     # --- model ---------------------------------------------------------
     model_dir: str = "../models"

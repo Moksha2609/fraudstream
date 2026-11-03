@@ -36,9 +36,12 @@ class RedisStreamQueue(QueueBackend):
     async def ping(self) -> bool:
         return bool(await self._r.ping())
 
-    async def publish(self, topic: str, payload: dict[str, Any]) -> str:
+    async def publish(self, topic: str, payload: dict[str, Any], maxlen: int | None = None) -> str:
         msg_id = await self._r.xadd(
-            topic, {FIELD: encode(payload)}, maxlen=self._maxlen, approximate=True
+            topic,
+            {FIELD: encode(payload)},
+            maxlen=self._maxlen if maxlen is None else maxlen,
+            approximate=True,
         )
         return msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
 

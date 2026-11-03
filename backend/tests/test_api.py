@@ -61,7 +61,8 @@ def test_score_fraud_creates_alert_and_feedback_flow(client, fraud_tx):
     assert client.get("/alerts", params={"status": "unreviewed"}).json() == []
 
     stats = client.get("/stats").json()
-    assert stats["alerts_total"] >= 1
+    assert stats["alerts_total"] == 1  # counted from the database, not process memory
+    assert stats["scored_total"] >= 1
     assert stats["feedback_fraud"] == 1
     assert stats["precision_on_feedback"] == 1.0
     assert stats["latency_p99_ms"] is not None and stats["latency_p99_ms"] < 100

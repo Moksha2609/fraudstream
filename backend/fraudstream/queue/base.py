@@ -36,8 +36,12 @@ def decode(raw: bytes | str) -> dict[str, Any]:
 
 class QueueBackend(ABC):
     @abstractmethod
-    async def publish(self, topic: str, payload: dict[str, Any]) -> str:
-        """Append a message; returns its id."""
+    async def publish(self, topic: str, payload: dict[str, Any], maxlen: int | None = None) -> str:
+        """Append a message; returns its id.
+
+        ``maxlen`` caps the topic's retained length where the backend supports
+        it (Redis Streams); used for high-frequency, low-value topics such as
+        stats heartbeats."""
 
     @abstractmethod
     def consume(

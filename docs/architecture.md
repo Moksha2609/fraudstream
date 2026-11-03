@@ -83,6 +83,19 @@ flowchart LR
 
 The sync path stays far below the 100 ms target; the queue path adds only broker round-trip time (sub-millisecond on a local Redis).
 
+## Fleet-wide stats and drift across processes
+
+Scoring counters, latency percentiles and the drift window live in whichever
+process scores. In Docker and on ECS that is the standalone consumers, not the
+API, so every consumer publishes a heartbeat every 2 s (`FS_STATS_INTERVAL_S`)
+on the `stats` topic: its counters, p50/p99, and its current drift report. The
+API subscribes (fan-out) and merges them (`metrics.StatsAggregator`,
+`drift.merge_reports`): totals are summed, throughput counts only heartbeats
+younger than `FS_STATS_STALE_S`, p99 is the worst worker, and per-feature PSI is
+averaged weighted by each worker's window fill. Alert counts on `/stats` come
+from the database so they survive restarts. The Redis `stats` stream is capped
+at 1,000 entries.
+
 ## Delivery guarantees
 
 * Redis Streams / Kafka give **at-least-once** delivery: a consumer acks only after the score (and alert, if any) is persisted. A crash between persist and ack can produce a duplicate alert row for the same `tx_id`; the dashboard dedupes on `tx_id` and a unique index can be added if exactly-once semantics are needed.

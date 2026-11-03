@@ -29,6 +29,7 @@ from sse_starlette.sse import EventSourceResponse
 from . import __version__, metrics
 from .config import Settings, get_settings
 from .consumer import build_pipeline, consume_forever
+from .drift import merge_reports
 from .queue import make_queue
 from .schemas import Alert, DriftReport, FeedbackRequest, ScoreResponse, Stats, Transaction
 from .scoring import ScoringPipeline
@@ -72,10 +73,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         queue = make_queue(settings)
         pipeline = build_pipeline(settings, queue)
         broadcaster = AlertBroadcaster()
+        aggregator = metrics.StatsAggregator(pipeline.rolling, stale_after=settings.stats_stale_s)
         app.state.settings = settings
         app.state.queue = queue
         app.state.pipeline = pipeline
         app.state.broadcaster = broadcaster
+        app.state.stats = aggregator
         app.state.started_at = time.time()
         stop = asyncio.Event()
         tasks: list[asyncio.Task] = []
@@ -94,7 +97,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     log.exception("alert relay failed; retrying in 2s")
                     await asyncio.sleep(2)
 
+        async def relay_stats() -> None:
+            # heartbeats from standalone scoring workers -> fleet-wide /stats and /drift
+            while not stop.is_set():
+                try:
+                    async for msg in queue.subscribe(settings.stats_topic):
+                        aggregator.ingest(msg.payload)
+                        if stop.is_set():
+                            break
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("stats relay failed; retrying in 2s")
+                    await asyncio.sleep(2)
+
         tasks.append(asyncio.create_task(relay_alerts(), name="alert-relay"))
+        tasks.append(asyncio.create_task(relay_stats(), name="stats-relay"))
         if settings.run_consumer:
             tasks.append(
                 asyncio.create_task(
@@ -211,15 +229,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ---- health & monitoring --------------------------------------------
     @app.get("/stats", response_model=Stats, tags=["monitoring"])
     def stats(request: Request) -> Stats:
+        """Fleet-wide numbers: this process + heartbeats from standalone consumers.
+
+        Alert counts come from the database so they survive restarts; scored
+        totals and throughput are per-process counters merged across workers."""
         p = pipe(request)
-        snap = p.rolling.snapshot()
+        snap = request.app.state.stats.snapshot()
         counts = p.store.counts()
         reviewed = counts["fraud"] + counts["false_alarm"]
         scored = int(snap["scored_total"] or 0)
+        alerts_live = int(snap["alerts_total"] or 0)
         return Stats(
             scored_total=scored,
-            alerts_total=int(snap["alerts_total"] or 0),
-            alert_rate=(int(snap["alerts_total"] or 0) / scored) if scored else 0.0,
+            alerts_total=counts["alerts_total"],
+            alert_rate=(alerts_live / scored) if scored else 0.0,
             feedback_fraud=counts["fraud"],
             feedback_false_alarm=counts["false_alarm"],
             unreviewed=counts["unreviewed"],
@@ -231,9 +254,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             threshold=p.model.threshold,
         )
 
+    def merged_drift() -> DriftReport:
+        """This process's drift report merged with fresh reports from remote workers."""
+        reports = [app.state.pipeline.drift.report()]
+        for raw in app.state.stats.remote_drift_reports():
+            with contextlib.suppress(Exception):  # tolerate a worker on an older schema
+                reports.append(DriftReport.model_validate(raw))
+        if len(reports) == 1:
+            return reports[0]
+        return merge_reports(reports, warn=settings.drift_psi_warn, alert=settings.drift_psi_alert)
+
     @app.get("/drift", response_model=DriftReport, tags=["monitoring"])
-    def drift(request: Request) -> DriftReport:
-        report = pipe(request).drift.report()
+    def drift() -> DriftReport:
+        report = merged_drift()
         metrics.publish_drift(report)
         return report
 
@@ -261,11 +294,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "queue_ok": ok,
             "uptime_s": round(time.time() - request.app.state.started_at, 1),
             "sse_clients": request.app.state.broadcaster.n_clients,
+            "scoring_workers": request.app.state.stats.snapshot()["workers"],
         }
 
     @app.get("/metrics", tags=["monitoring"])
     def prometheus() -> Response:
-        metrics.publish_drift(app.state.pipeline.drift.report())
+        metrics.publish_drift(merged_drift())
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     return app

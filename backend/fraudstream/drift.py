@@ -53,6 +53,63 @@ def psi_from_values(reference: dict[str, list[float]], values: np.ndarray) -> fl
     return psi(np.asarray(reference["freq"]), actual)
 
 
+def merge_reports(reports: list[DriftReport], warn: float = 0.1, alert: float = 0.2) -> DriftReport:
+    """Combine drift reports from several scoring workers into one.
+
+    Workers in a consumer group each see a random share of the same traffic, so
+    their per-feature PSI values estimate the same quantity: we average them
+    (weighted by each worker's window fill) and sum the observation counts.
+    """
+    if not reports:
+        raise ValueError("no reports to merge")
+    usable = [r for r in reports if r.status != "insufficient_data"]
+    observed = sum(r.observed for r in reports)
+    if not usable:
+        base = reports[0]
+        return base.model_copy(update={"observed": observed, "computed_at": datetime.now(UTC)})
+
+    def status(v: float) -> str:
+        return "drift" if v >= alert else "warn" if v >= warn else "ok"
+
+    weights = [max(min(r.observed, r.window_size), 1) for r in usable]
+    total_w = float(sum(weights))
+    psi: dict[str, float] = {}
+    for r, w in zip(usable, weights, strict=True):
+        for f in r.features:
+            psi[f.name] = psi.get(f.name, 0.0) + f.psi * w / total_w
+    feats = [
+        DriftFeature(name=n, psi=round(v, 4), status=status(v))  # type: ignore[arg-type]
+        for n, v in psi.items()
+    ]
+    feats.sort(key=lambda f: f.psi, reverse=True)
+    score_vals = [
+        (r.score_psi, w) for r, w in zip(usable, weights, strict=True) if r.score_psi is not None
+    ]
+    score_psi = (
+        round(sum(v * w for v, w in score_vals) / sum(w for _, w in score_vals), 4)
+        if score_vals
+        else None
+    )
+    rate_vals = [
+        (r.alert_rate, w) for r, w in zip(usable, weights, strict=True) if r.alert_rate is not None
+    ]
+    alert_rate = (
+        sum(v * w for v, w in rate_vals) / sum(w for _, w in rate_vals) if rate_vals else None
+    )
+    worst = max([f.psi for f in feats] + [score_psi or 0.0])
+    return DriftReport(
+        window_size=max(r.window_size for r in reports),
+        observed=observed,
+        status=status(worst),  # type: ignore[arg-type]
+        score_psi=score_psi,
+        alert_rate=alert_rate,
+        reference_alert_rate=usable[0].reference_alert_rate,
+        features=feats,
+        drifted_features=[f.name for f in feats if f.status == "drift"],
+        computed_at=datetime.now(UTC),
+    )
+
+
 class DriftMonitor:
     """Thread-safe sliding-window drift detector."""
 

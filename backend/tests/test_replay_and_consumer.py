@@ -3,7 +3,7 @@ import asyncio
 import pandas as pd
 
 from fraudstream.config import Settings
-from fraudstream.consumer import build_pipeline, consume_forever
+from fraudstream.consumer import build_pipeline, consume_forever, stats_heartbeat
 from fraudstream.queue.memory import MemoryQueue
 from fraudstream.replay import iter_transactions, load_dataset, replay_to_queue
 
@@ -82,3 +82,30 @@ async def test_consumer_drops_malformed_messages(model_dir, tmp_path):
     n = await asyncio.wait_for(consume_forever(pipeline, q, settings, max_messages=1), timeout=10)
     assert n == 1
     assert len(q.acked) == 2  # bad message acked (dropped), good one acked after scoring
+
+
+async def test_stats_heartbeat_publishes_counters_and_drift(model_dir, tmp_path, dataset):
+    settings = Settings(
+        queue_backend="memory",
+        model_dir=str(model_dir),
+        database_url=f"sqlite:///{tmp_path / 'hb.db'}",
+        _env_file=None,
+    )
+    q = MemoryQueue()
+    pipeline = build_pipeline(settings, q)
+    sample = dataset.head(20)
+    await replay_to_queue(sample, q, settings.tx_topic, speed=None, rate=None)
+    await consume_forever(pipeline, q, settings, max_messages=len(sample))
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(stats_heartbeat(pipeline, q, settings, "worker-A", stop, 0.02))
+    await asyncio.sleep(0.1)
+    stop.set()
+    await task
+
+    assert q.pending(settings.stats_topic) >= 2
+    hb = (await q._work[settings.stats_topic].get()).payload
+    assert hb["source"] == "worker-A"
+    assert hb["scored_total"] == len(sample)
+    assert hb["latency_p99_ms"] is not None
+    assert hb["drift"]["observed"] == len(sample)

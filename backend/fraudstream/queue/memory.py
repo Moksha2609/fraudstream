@@ -21,7 +21,7 @@ class MemoryQueue(QueueBackend):
         self._subs: dict[str, list[asyncio.Queue[Message]]] = defaultdict(list)
         self.acked: set[str] = set()
 
-    async def publish(self, topic: str, payload: dict[str, Any]) -> str:
+    async def publish(self, topic: str, payload: dict[str, Any], maxlen: int | None = None) -> str:
         msg = Message(id=str(next(self._counter)), payload=dict(payload))
         await self._work[topic].put(msg)
         for q in self._subs[topic]:

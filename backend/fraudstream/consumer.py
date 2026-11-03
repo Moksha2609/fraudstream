@@ -7,6 +7,7 @@ independently of the API, or in-process inside the API with FS_RUN_CONSUMER=1.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import socket
@@ -50,17 +51,51 @@ def build_pipeline(settings: Settings, queue: QueueBackend | None) -> ScoringPip
     )
 
 
+def resolve_consumer_name(settings: Settings) -> str:
+    """The configured consumer name, or a host+pid default that is unique per process."""
+    if settings.consumer_name == "scorer-1":
+        return f"{socket.gethostname()}-{os.getpid()}"
+    return settings.consumer_name
+
+
+async def stats_heartbeat(
+    pipeline: ScoringPipeline,
+    queue: QueueBackend,
+    settings: Settings,
+    source: str,
+    stop: asyncio.Event,
+    interval: float | None = None,
+) -> None:
+    """Publish this worker's counters, latency and drift report every ``interval`` s.
+
+    The API subscribes to ``settings.stats_topic`` and merges heartbeats from
+    all workers (see ``metrics.StatsAggregator``)."""
+    interval = settings.stats_interval_s if interval is None else interval
+    while not stop.is_set():
+        payload = {
+            "source": source,
+            "ts": time.time(),
+            **pipeline.rolling.snapshot(),
+            "drift": pipeline.drift.report().model_dump(mode="json"),
+        }
+        try:
+            await queue.publish(settings.stats_topic, payload, maxlen=1000)
+        except Exception:  # broker hiccup: never let stats kill the worker
+            log.warning("stats heartbeat failed", exc_info=True)
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+
+
 async def consume_forever(
     pipeline: ScoringPipeline,
     queue: QueueBackend,
     settings: Settings,
     stop: asyncio.Event | None = None,
     max_messages: int | None = None,
+    consumer_name: str | None = None,
 ) -> int:
     """Consume until ``stop`` is set (or ``max_messages`` processed). Returns count."""
-    consumer_name = settings.consumer_name
-    if consumer_name == "scorer-1":  # default -> make unique per host/pid
-        consumer_name = f"{socket.gethostname()}-{os.getpid()}"
+    consumer_name = consumer_name or resolve_consumer_name(settings)
     log.info(
         "consumer %s joining group %s on %s",
         consumer_name,
@@ -101,9 +136,22 @@ async def _main_async() -> None:
     )
     queue = make_queue(settings)
     pipeline = build_pipeline(settings, queue)
+    stop = asyncio.Event()
+    name = resolve_consumer_name(settings)
+    tasks: list[asyncio.Task] = []
+    if settings.stats_interval_s > 0:
+        tasks.append(
+            asyncio.create_task(
+                stats_heartbeat(pipeline, queue, settings, name, stop), name="stats-heartbeat"
+            )
+        )
     try:
-        await consume_forever(pipeline, queue, settings)
+        await consume_forever(pipeline, queue, settings, stop, consumer_name=name)
     finally:
+        stop.set()
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         await queue.close()
 
 

@@ -39,7 +39,8 @@ class KafkaQueue(QueueBackend):
         except Exception:  # pragma: no cover - needs a broker
             return False
 
-    async def publish(self, topic: str, payload: dict[str, Any]) -> str:
+    async def publish(self, topic: str, payload: dict[str, Any], maxlen: int | None = None) -> str:
+        # Kafka retention is a topic setting, so maxlen is ignored here
         producer = await self._get_producer()
         meta = await producer.send_and_wait(topic, encode(payload))
         return f"{meta.partition}:{meta.offset}"

@@ -64,6 +64,71 @@ class RollingStats:
         }
 
 
+class StatsAggregator:
+    """Merges this process's RollingStats with heartbeats from other scoring processes.
+
+    In a multi-process deployment the API serves HTTP while separate consumer
+    processes do the scoring, so the API's own counters would read zero. Each
+    standalone consumer publishes a heartbeat (``consumer.stats_heartbeat``)
+    with its counters, latency percentiles and drift report; the API ingests
+    them here and reports fleet-wide numbers on /stats and /drift.
+    """
+
+    def __init__(self, own: RollingStats, stale_after: float = 10.0):
+        self.own = own
+        self.stale_after = stale_after
+        self._remote: dict[str, tuple[dict, float]] = {}
+        self._lock = threading.Lock()
+
+    def ingest(self, heartbeat: dict) -> None:
+        source = heartbeat.get("source")
+        if not source:
+            return
+        with self._lock:
+            self._remote[source] = (dict(heartbeat), time.time())
+
+    def _remotes(self) -> list[tuple[dict, bool]]:
+        now = time.time()
+        with self._lock:
+            return [(hb, now - at <= self.stale_after) for hb, at in self._remote.values()]
+
+    def snapshot(self) -> dict[str, float | int | None]:
+        own = self.own.snapshot()
+        remotes = self._remotes()
+        scored = int(own["scored_total"] or 0)
+        alerts = int(own["alerts_total"] or 0)
+        throughput = float(own["throughput_per_s"] or 0.0)
+        p50: list[tuple[float, int]] = []
+        p99: list[float] = []
+        if own["latency_p50_ms"] is not None:
+            p50.append((float(own["latency_p50_ms"]), max(scored, 1)))
+            p99.append(float(own["latency_p99_ms"]))
+        workers = 1 if scored else 0
+        for hb, fresh in remotes:
+            n = int(hb.get("scored_total") or 0)
+            scored += n
+            alerts += int(hb.get("alerts_total") or 0)
+            if fresh:
+                throughput += float(hb.get("throughput_per_s") or 0.0)
+                workers += 1
+            if hb.get("latency_p50_ms") is not None:
+                p50.append((float(hb["latency_p50_ms"]), max(n, 1)))
+                p99.append(float(hb["latency_p99_ms"]))
+        weight = sum(w for _, w in p50)
+        return {
+            "scored_total": scored,
+            "alerts_total": alerts,
+            "throughput_per_s": round(throughput, 2),
+            "latency_p50_ms": round(sum(v * w for v, w in p50) / weight, 3) if weight else None,
+            "latency_p99_ms": round(max(p99), 3) if p99 else None,
+            "workers": workers,
+        }
+
+    def remote_drift_reports(self) -> list[dict]:
+        """Latest drift report from every fresh remote worker."""
+        return [hb["drift"] for hb, fresh in self._remotes() if fresh and hb.get("drift")]
+
+
 def publish_drift(report) -> None:
     for f in report.features:
         DRIFT_PSI.labels(feature=f.name).set(f.psi)
