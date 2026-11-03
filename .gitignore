@@ -22,3 +22,6 @@ dashboard/dist/
 .terraform/
 *.tfstate*
 .claude/
+
+# terraform inputs may hold secrets (dashboard password)
+infra/terraform/terraform.tfvars

@@ -477,7 +477,7 @@ resource "aws_lb_target_group" "dashboard" {
   vpc_id      = data.aws_vpc.default.id
 
   health_check {
-    path                = "/"
+    path                = "/healthz"
     interval            = 15
     healthy_threshold   = 2
     unhealthy_threshold = 3
@@ -599,6 +599,10 @@ resource "aws_ecs_task_definition" "dashboard" {
     name      = "dashboard"
     image     = "${aws_ecr_repository.dashboard.repository_url}:${var.dashboard_image_tag}"
     essential = true
+    environment = [
+      { name = "DASHBOARD_USER", value = var.dashboard_user },
+      { name = "DASHBOARD_PASSWORD", value = var.dashboard_password },
+    ]
     portMappings = [{
       name          = "dashboard"
       containerPort = 80
@@ -620,8 +624,9 @@ resource "aws_ecs_task_definition" "dashboard" {
   }
 }
 
-# Demo producer. The image has no dataset baked in, so the replay falls back
-# to the built-in synthetic generator; mount EFS or bake data/ for the real set.
+# Demo producer. The image has no dataset baked in, so the task downloads the
+# public dataset (var.dataset_url, ~150 MB) into ephemeral storage at start-up
+# and then replays it in a loop so the dashboard always has live alerts.
 resource "aws_ecs_task_definition" "replay" {
   count                    = var.enable_replay ? 1 : 0
   family                   = "${local.name}-replay"
@@ -633,10 +638,13 @@ resource "aws_ecs_task_definition" "replay" {
   task_role_arn            = aws_iam_role.task.arn
 
   container_definitions = jsonencode([{
-    name        = "replay"
-    image       = "${aws_ecr_repository.api.repository_url}:${var.api_image_tag}"
-    essential   = true
-    command     = ["fraudstream-replay", "--data", "/data/creditcard.csv", "--speed", tostring(var.replay_speed), "--loop"]
+    name      = "replay"
+    image     = "${aws_ecr_repository.api.repository_url}:${var.api_image_tag}"
+    essential = true
+    command = ["sh", "-c", join(" ", [
+      "curl -fsSL --retry 5 -o /tmp/creditcard.csv '${var.dataset_url}' &&",
+      "fraudstream-replay --data /tmp/creditcard.csv --speed ${var.replay_speed} --loop",
+    ])]
     environment = local.backend_env
     secrets     = local.backend_secrets
     logConfiguration = {

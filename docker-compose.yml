@@ -119,6 +119,10 @@ services:
     build:
       context: ./dashboard
     image: fraudstream/dashboard:local
+    environment:
+      # set DASHBOARD_PASSWORD in .env to require a login
+      DASHBOARD_USER: ${DASHBOARD_USER:-owner}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-}
     ports:
       - "${DASHBOARD_PORT:-3000}:80"
     depends_on:

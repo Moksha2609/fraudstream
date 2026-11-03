@@ -85,3 +85,22 @@ variable "log_retention_days" {
   type    = number
   default = 30
 }
+
+variable "dashboard_user" {
+  description = "Username for the dashboard's HTTP basic auth"
+  type        = string
+  default     = "owner"
+}
+
+variable "dashboard_password" {
+  description = "Password for the dashboard's HTTP basic auth; empty disables auth (not recommended on a public ALB)"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "dataset_url" {
+  description = "URL the demo replay task downloads the labelled dataset from at start-up"
+  type        = string
+  default     = "https://www.openml.org/data/get_csv/1673544/phpKo8OWT"
+}

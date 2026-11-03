@@ -4,3 +4,7 @@ github_repo = "your-org/fraudstream"
 
 api_desired_count = 2
 enable_replay     = false   # true to stream the synthetic dataset into the queue as a demo
+
+# Required anywhere the ALB is reachable from the internet.
+dashboard_user     = "owner"
+dashboard_password = "change-me"

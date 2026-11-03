@@ -22,10 +22,17 @@ Public entry points (output `alb_dns_name`):
 
 ```bash
 cd infra/terraform
-cp terraform.tfvars.example terraform.tfvars   # set github_repo
+cp terraform.tfvars.example terraform.tfvars   # set github_repo and dashboard_password
 terraform init
 terraform apply
 ```
+
+`dashboard_password` turns on HTTP basic auth for the whole dashboard (user
+`dashboard_user`, default `owner`), including its `/api/` proxy. Leave it empty
+only if something else (VPN, Cognito on the ALB) guards access. The file is
+git-ignored because of it. With `enable_replay = true` the replay task
+downloads the public dataset from `dataset_url` at start-up and streams it in a
+loop, so the dashboard always shows live alerts.
 
 Then in the GitHub repository settings:
 
