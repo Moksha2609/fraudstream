@@ -1,0 +1,147 @@
+# Deploy to AWS ECS (Fargate).
+#
+# Triggers: a version tag (v1.2.3) or a manual run.
+#
+# Required repository configuration (Settings -> Secrets and variables -> Actions):
+#   secrets.AWS_DEPLOY_ROLE_ARN   IAM role assumed via GitHub OIDC (output `github_deploy_role_arn`
+#                                 of infra/terraform). No long-lived AWS keys are stored.
+#   vars.AWS_REGION               e.g. eu-west-1
+#   vars.ECR_API_REPOSITORY       e.g. fraudstream/api        (terraform output ecr_api_repository)
+#   vars.ECR_DASHBOARD_REPOSITORY e.g. fraudstream/dashboard  (terraform output ecr_dashboard_repository)
+#   vars.ECS_CLUSTER              e.g. fraudstream            (terraform output ecs_cluster_name)
+#   vars.ECS_API_SERVICE          e.g. fraudstream-api
+#   vars.ECS_DASHBOARD_SERVICE    e.g. fraudstream-dashboard
+#   vars.MODEL_BUCKET             S3 bucket holding the approved model (terraform output model_bucket)
+#
+# Model promotion: upload the model you want to ship with
+#   aws s3 sync models/ s3://$MODEL_BUCKET/models/
+# The workflow bakes s3://$MODEL_BUCKET/models/ into the API image, so a
+# deploy is always a (code, model) pair you can roll back together.
+
+name: Deploy to AWS
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      model_prefix:
+        description: "S3 prefix of the model to bake (default: models/)"
+        required: false
+        default: "models/"
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  build-and-deploy:
+    name: Build, push and roll out
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Fetch approved model from S3 (baked into the API image)
+        env:
+          MODEL_PREFIX: ${{ github.event.inputs.model_prefix || 'models/' }}
+        run: |
+          aws s3 sync "s3://${{ vars.MODEL_BUCKET }}/${MODEL_PREFIX}" backend/models/ \
+            --exclude "*" --include "*.json"
+          test -f backend/models/fraud_xgb.json || { echo "no model found at s3://${{ vars.MODEL_BUCKET }}/${MODEL_PREFIX}"; exit 1; }
+          python3 -c "import json;m=json.load(open('backend/models/fraud_xgb.meta.json'));print('model version', m['version'], 'threshold', m['threshold'])"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          file: backend/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_API_REPOSITORY }}:${{ env.IMAGE_TAG }}
+            ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_API_REPOSITORY }}:latest
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,scope=backend,mode=max
+          provenance: false
+
+      - name: Build and push dashboard image
+        uses: docker/build-push-action@v6
+        with:
+          context: dashboard
+          push: true
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_DASHBOARD_REPOSITORY }}:${{ env.IMAGE_TAG }}
+            ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_DASHBOARD_REPOSITORY }}:latest
+          cache-from: type=gha,scope=dashboard
+          cache-to: type=gha,scope=dashboard,mode=max
+          provenance: false
+
+      # The JSON task definitions in infra/ecs contain placeholders that terraform
+      # also manages; we pull the *live* definition so env/secrets stay in sync
+      # with infra, then swap only the image.
+      - name: Download current task definitions
+        run: |
+          aws ecs describe-task-definition --task-definition fraudstream-api \
+            --query taskDefinition > api-task-def.json
+          aws ecs describe-task-definition --task-definition fraudstream-dashboard \
+            --query taskDefinition > dashboard-task-def.json
+
+      - name: Render API task definition
+        id: render-api
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: api-task-def.json
+          container-name: api
+          image: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_API_REPOSITORY }}:${{ env.IMAGE_TAG }}
+
+      - name: Render dashboard task definition
+        id: render-dashboard
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: dashboard-task-def.json
+          container-name: dashboard
+          image: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_DASHBOARD_REPOSITORY }}:${{ env.IMAGE_TAG }}
+
+      - name: Deploy API service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-api.outputs.task-definition }}
+          cluster: ${{ vars.ECS_CLUSTER }}
+          service: ${{ vars.ECS_API_SERVICE }}
+          wait-for-service-stability: true
+          wait-for-minutes: 15
+
+      - name: Deploy dashboard service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-dashboard.outputs.task-definition }}
+          cluster: ${{ vars.ECS_CLUSTER }}
+          service: ${{ vars.ECS_DASHBOARD_SERVICE }}
+          wait-for-service-stability: true
+          wait-for-minutes: 10
+
+      - name: Smoke test
+        run: |
+          ALB=$(aws elbv2 describe-load-balancers --names fraudstream \
+                --query 'LoadBalancers[0].DNSName' --output text)
+          API_URL="http://${ALB}:8000" bash scripts/smoke.sh

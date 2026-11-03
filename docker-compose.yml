@@ -1,0 +1,157 @@
+# fraudstream local stack.
+#
+#   cp .env.example .env
+#   docker compose --profile train run --rm train      # train the model once (writes ./models)
+#   docker compose up --build                           # redis, postgres, api, consumer, replay, dashboard, prometheus
+#   docker compose up --scale consumer=3                # more scoring workers
+#   docker compose -f docker-compose.yml -f docker-compose.kafka.yml up   # Kafka instead of Redis Streams
+#
+# Dashboard: http://localhost:3000   API docs: http://localhost:8000/docs   Prometheus: http://localhost:9090
+
+name: fraudstream
+
+x-backend: &backend
+  build:
+    context: ./backend
+    dockerfile: Dockerfile
+  image: fraudstream/backend:local
+  env_file:
+    - path: .env
+      required: false
+  environment: &backend-env
+    FS_QUEUE_BACKEND: ${FS_QUEUE_BACKEND:-redis}
+    FS_REDIS_URL: ${FS_REDIS_URL:-redis://redis:6379/0}
+    FS_KAFKA_BOOTSTRAP: ${FS_KAFKA_BOOTSTRAP:-kafka:9092}
+    FS_TX_TOPIC: ${FS_TX_TOPIC:-transactions}
+    FS_ALERT_TOPIC: ${FS_ALERT_TOPIC:-alerts}
+    FS_CONSUMER_GROUP: ${FS_CONSUMER_GROUP:-scorer}
+    FS_MODEL_DIR: /models
+    FS_MODEL_NAME: ${FS_MODEL_NAME:-fraud_xgb}
+    FS_DATABASE_URL: ${FS_DATABASE_URL:-postgresql+psycopg://fraud:fraud@postgres:5432/fraudstream}
+    FS_DRIFT_WINDOW: ${FS_DRIFT_WINDOW:-5000}
+    FS_DRIFT_PSI_WARN: ${FS_DRIFT_PSI_WARN:-0.1}
+    FS_DRIFT_PSI_ALERT: ${FS_DRIFT_PSI_ALERT:-0.2}
+    FS_LOG_LEVEL: ${FS_LOG_LEVEL:-info}
+  volumes:
+    - ./models:/models:ro
+  restart: unless-stopped
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--save", ""]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fraud}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fraud}
+      POSTGRES_DB: ${POSTGRES_DB:-fraudstream}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fraud} -d ${POSTGRES_DB:-fraudstream}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    <<: *backend
+    command: ["fraudstream-api"]
+    environment:
+      <<: *backend-env
+      FS_RUN_CONSUMER: "false"
+      FS_API_HOST: 0.0.0.0
+      FS_API_PORT: "8000"
+      FS_CORS_ORIGINS: ${FS_CORS_ORIGINS:-*}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  consumer:
+    <<: *backend
+    command: ["fraudstream-consumer"]
+    healthcheck:
+      disable: true
+    deploy:
+      replicas: 2
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  replay:
+    <<: *backend
+    command: >
+      fraudstream-replay --data /data/creditcard.csv
+      --speed ${REPLAY_SPEED:-120} ${REPLAY_ARGS:---loop}
+    healthcheck:
+      disable: true
+    volumes:
+      - ./models:/models:ro
+      - ./data:/data:ro
+    restart: on-failure
+    depends_on:
+      api:
+        condition: service_healthy
+
+  dashboard:
+    build:
+      context: ./dashboard
+    image: fraudstream/dashboard:local
+    ports:
+      - "${DASHBOARD_PORT:-3000}:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # one-shot: docker compose --profile train run --rm train
+  train:
+    <<: *backend
+    profiles: ["train"]
+    command: ["python", "-m", "ml.train", "--data", "/data/creditcard.csv", "--out-dir", "/models"]
+    healthcheck:
+      disable: true
+    volumes:
+      - ./models:/models
+      - ./data:/data:ro
+    restart: "no"
+
+volumes:
+  redis-data:
+  postgres-data:
+  prometheus-data:

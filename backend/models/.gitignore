@@ -1,0 +1,4 @@
+# Staging directory for baking a model into the Docker image (see backend/Dockerfile).
+# Populated by the deploy workflow; never commit model artifacts here.
+*
+!.gitignore

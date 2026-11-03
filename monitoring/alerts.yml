@@ -1,0 +1,38 @@
+# Prometheus alerting rules for the scoring service. Wire an Alertmanager
+# receiver (Slack, PagerDuty, email) to get paged on these.
+groups:
+  - name: fraudstream
+    rules:
+      - alert: FraudModelDrift
+        expr: fraudstream_drift_status >= 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Model drift detected (PSI above alert threshold)"
+          description: "At least one feature or the score distribution has PSI > FS_DRIFT_PSI_ALERT for 5 minutes. Review /drift and consider retraining."
+
+      - alert: FraudScoringLatencyHigh
+        expr: histogram_quantile(0.99, sum(rate(fraudstream_request_latency_seconds_bucket[5m])) by (le)) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "/score p99 latency above 100 ms"
+
+      - alert: FraudAlertRateSpike
+        expr: |
+          rate(fraudstream_alerts_total[10m]) / ignoring(path) sum(rate(fraudstream_scored_total[10m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 5% of transactions are being flagged"
+
+      - alert: FraudConsumerLagging
+        expr: fraudstream_consumer_lag_seconds > 30
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Scoring consumers are more than 30 s behind the transaction stream"

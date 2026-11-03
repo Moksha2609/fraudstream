@@ -1,0 +1,58 @@
+{
+  "family": "fraudstream-api",
+  "requiresCompatibilities": ["FARGATE"],
+  "networkMode": "awsvpc",
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/fraudstream-task-execution",
+  "taskRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/fraudstream-task",
+  "runtimePlatform": { "operatingSystemFamily": "LINUX", "cpuArchitecture": "X86_64" },
+  "containerDefinitions": [
+    {
+      "name": "api",
+      "image": "<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/fraudstream/api:latest",
+      "essential": true,
+      "portMappings": [
+        { "name": "api", "containerPort": 8000, "protocol": "tcp", "appProtocol": "http" }
+      ],
+      "environment": [
+        { "name": "FS_QUEUE_BACKEND", "value": "redis" },
+        { "name": "FS_REDIS_URL", "value": "redis://<ELASTICACHE_PRIMARY_ENDPOINT>:6379/0" },
+        { "name": "FS_TX_TOPIC", "value": "transactions" },
+        { "name": "FS_ALERT_TOPIC", "value": "alerts" },
+        { "name": "FS_CONSUMER_GROUP", "value": "scorer" },
+        { "name": "FS_MODEL_DIR", "value": "/models" },
+        { "name": "FS_MODEL_NAME", "value": "fraud_xgb" },
+        { "name": "FS_RUN_CONSUMER", "value": "true" },
+        { "name": "FS_API_HOST", "value": "0.0.0.0" },
+        { "name": "FS_API_PORT", "value": "8000" },
+        { "name": "FS_CORS_ORIGINS", "value": "*" },
+        { "name": "FS_DRIFT_WINDOW", "value": "5000" },
+        { "name": "FS_DRIFT_PSI_WARN", "value": "0.1" },
+        { "name": "FS_DRIFT_PSI_ALERT", "value": "0.2" },
+        { "name": "FS_LOG_LEVEL", "value": "info" }
+      ],
+      "secrets": [
+        {
+          "name": "FS_DATABASE_URL",
+          "valueFrom": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:fraudstream/database_url-XXXXXX"
+        }
+      ],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health || exit 1"],
+        "interval": 15,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 30
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/fraudstream/api",
+          "awslogs-region": "<REGION>",
+          "awslogs-stream-prefix": "api"
+        }
+      }
+    }
+  ]
+}

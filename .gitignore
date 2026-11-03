@@ -1,0 +1,23 @@
+# data & models (large / generated)
+data/*.csv
+data/*.parquet
+models/*.json
+models/*.ubj
+!models/.gitkeep
+!data/.gitkeep
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+# node
+node_modules/
+dashboard/dist/
+# misc
+.env
+*.db
+.terraform/
+*.tfstate*

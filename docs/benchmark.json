@@ -1,0 +1,38 @@
+{
+  "timestamp": "2026-11-02T20:55:49",
+  "xgboost": "3.4.1",
+  "cudf": null,
+  "gpu": null,
+  "cpu": "Intel64 Family 6 Model 140 Stepping 1, GenuineIntel",
+  "rounds": 300,
+  "results": [
+    {
+      "replicate": 1,
+      "rows": 284807,
+      "cpu": {
+        "device": "cpu",
+        "rows": 284807,
+        "rounds": 300,
+        "dmatrix_seconds": 0.323,
+        "fit_seconds": 4.472,
+        "predict_seconds": 0.273,
+        "total_seconds": 4.795,
+        "load_seconds": 0.039
+      }
+    },
+    {
+      "replicate": 4,
+      "rows": 1139228,
+      "cpu": {
+        "device": "cpu",
+        "rows": 1139228,
+        "rounds": 300,
+        "dmatrix_seconds": 1.164,
+        "fit_seconds": 21.918,
+        "predict_seconds": 1.472,
+        "total_seconds": 23.081,
+        "load_seconds": 0.189
+      }
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+# GPU training / benchmarking image built on RAPIDS (cuDF + GPU XGBoost).
+#
+# Check the current tag list at https://hub.docker.com/r/rapidsai/base - tags
+# follow <rapids-version>-cuda<cuda-version>-py<python-version>. Pick one whose
+# CUDA version is <= the driver on the host.
+#
+#   docker build -f backend/Dockerfile.gpu -t fraudstream/gpu backend/
+#   docker run --rm --gpus all \
+#       -v $PWD/data:/data:ro -v $PWD/models:/models -v $PWD/docs:/docs \
+#       fraudstream/gpu
+#
+# The default command runs the CPU-vs-GPU benchmark and writes the speedup
+# report to /docs/benchmark.json. Override it to train on the GPU instead:
+#   ... fraudstream/gpu python -m ml.train --data /data/creditcard.csv --out-dir /models --device cuda
+
+ARG RAPIDS_TAG=24.12-cuda12.5-py3.12
+FROM rapidsai/base:${RAPIDS_TAG}
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+USER root
+WORKDIR /app
+
+COPY pyproject.toml ./
+COPY fraudstream ./fraudstream
+COPY ml ./ml
+# RAPIDS ships its own CUDA-enabled xgboost build; install the package without
+# re-resolving xgboost so pip does not replace it with the PyPI wheel.
+RUN pip install --no-deps . \
+    && pip install fastapi "uvicorn[standard]" pydantic pydantic-settings scikit-learn \
+       redis aiokafka sqlalchemy prometheus-client orjson httpx sse-starlette
+
+RUN mkdir -p /models /docs && chown -R rapids:conda /app /models /docs
+USER rapids
+
+ENV FS_MODEL_DIR=/models \
+    FS_MODEL_NAME=fraud_xgb
+
+CMD ["python", "-m", "ml.benchmark_gpu", "--data", "/data/creditcard.csv", "--out", "/docs/benchmark.json"]
